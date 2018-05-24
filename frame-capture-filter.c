@@ -101,7 +101,7 @@ static void finish_folder(wchar_t *folder, wchar_t *save_path)
   }
 }
 
-static void save_frame(uint8_t *raw_frame, unsigned width, unsigned height, int quality, wchar_t *fname)
+static void save_frame(uint8_t *raw_frame, uint32_t linesize, uint32_t width, uint32_t height, wchar_t *fname)
 {
   FILE *f = _wfopen(fname, L"wb");
 
@@ -117,7 +117,7 @@ static void save_frame(uint8_t *raw_frame, unsigned width, unsigned height, int 
   cinfo.in_color_space = JCS_RGB;
 
   jpeg_set_defaults(&cinfo);
-  jpeg_set_quality(&cinfo, quality, true);
+  jpeg_set_quality(&cinfo, 90, true);
   jpeg_start_compress(&cinfo, true);
 
   JSAMPROW row_ptr[1];
@@ -125,8 +125,8 @@ static void save_frame(uint8_t *raw_frame, unsigned width, unsigned height, int 
   row_ptr[0] = &row_buf[0];
 
   while (cinfo.next_scanline < cinfo.image_height) {
-    unsigned offset = cinfo.next_scanline * cinfo.image_width * 4;
-    for (unsigned i = 0; i < cinfo.image_width; i++) {
+    uint32_t offset = cinfo.next_scanline * linesize;
+    for (uint32_t i = 0; i < cinfo.image_width; i++) {
       row_buf[i * 3] = raw_frame[offset + (i * 4)];
       row_buf[(i * 3) + 1] = raw_frame[offset + (i * 4) + 1];
       row_buf[(i * 3) + 2] = raw_frame[offset + (i * 4) + 2];
@@ -140,7 +140,7 @@ static void save_frame(uint8_t *raw_frame, unsigned width, unsigned height, int 
   fclose(f);
 }
 
-static void process_raw_frame(void *data, uint8_t *raw_frame)
+static void process_raw_frame(void *data)
 {
   struct frame_capture_filter_data *filter = data;
 
@@ -157,7 +157,7 @@ static void process_raw_frame(void *data, uint8_t *raw_frame)
     filter->frame_count = 0;
   }
   generate_filename(systemtime, fname, filter->current_folder, filter->save_path);
-  save_frame(raw_frame, filter->width, filter->height, 90, fname);
+  save_frame(filter->frame_data, filter->frame_linesize, filter->width, filter->height, fname);
   filter->frame_count = filter->frame_count + 1;
 }
 
@@ -169,7 +169,7 @@ static void *write_thread(void *data)
     if (os_event_try(filter->stop_event) == 0)
       break;
     pthread_mutex_lock(&filter->write_mutex);
-    process_raw_frame(filter, filter->frame_data);
+    process_raw_frame(filter);
     pthread_mutex_unlock(&filter->write_mutex);
   }
   return NULL;
