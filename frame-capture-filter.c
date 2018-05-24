@@ -1,0 +1,387 @@
+#include <stdio.h>
+#include <shlobj.h>
+#include <inttypes.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <media-io/video-io.h>
+#include <media-io/video-frame.h>
+#include <obs-module.h>
+#include <libjpeg/jpeglib.h>
+
+OBS_DECLARE_MODULE()
+
+struct frame_capture_filter_data {
+  obs_source_t *source;
+
+  wchar_t *save_path;
+  wchar_t *current_folder;
+  int frame_count;
+  DWORD last_frame_at;
+  uint32_t width;
+  uint32_t height;
+  gs_texrender_t* texrender;
+  gs_stagesurf_t* stagesurface;
+  uint8_t *frame_data;
+  uint32_t frame_linesize;
+
+  pthread_mutex_t write_mutex;
+  pthread_t write_thread;
+  os_sem_t *write_sem;
+  os_event_t *stop_event;
+};
+
+static const char *frame_capture_filter_name(void *data)
+{
+  UNUSED_PARAMETER(data);
+  return "Pursuit Frame Capture";
+}
+
+static void frame_capture_filter_update(void *data, obs_data_t *settings)
+{
+  UNUSED_PARAMETER(data);
+  UNUSED_PARAMETER(settings);
+}
+
+static bool open_pursuit(obs_properties_t *pps, obs_property_t *prop, void *data)
+{
+  ShellExecute(NULL, "open", "https://pursuit.gg/obs", NULL, NULL, SW_SHOWNORMAL);
+  return true;
+}
+
+static obs_properties_t *frame_capture_filter_properties(void *data)
+{
+  struct frame_capture_filter_data *filter = data;
+  obs_properties_t *props = obs_properties_create();
+
+  obs_properties_add_button(props, "pursuit_website", "Pursuit.gg Plugin Instructions", open_pursuit);
+  return props;
+}
+
+void frame_capture_filter_defaults(obs_data_t* defaults) {
+  UNUSED_PARAMETER(defaults);
+}
+
+static void generate_folder(SYSTEMTIME systemtime, wchar_t *folder, wchar_t *save_path)
+{
+  wchar_t dirname[MAX_PATH];
+
+  swprintf_s(folder, sizeof(wchar_t) * 18, L"%04d%02d%02d%02d%02d%02d%03d", systemtime.wYear, systemtime.wMonth, systemtime.wDay, systemtime.wHour, systemtime.wMinute, systemtime.wSecond, systemtime.wMilliseconds);
+  wcscpy_s(dirname, sizeof(dirname), save_path);
+  wcscat_s(dirname, sizeof(dirname), L"/");
+  wcscat_s(dirname, sizeof(dirname), folder);
+
+  _wmkdir(dirname);
+}
+
+static void generate_filename(SYSTEMTIME systemtime, wchar_t *fname, wchar_t *folder, wchar_t *save_path)
+{
+  wchar_t timestring[18];
+
+  swprintf_s(timestring, sizeof(timestring), L"%04d%02d%02d%02d%02d%02d%03d", systemtime.wYear, systemtime.wMonth, systemtime.wDay, systemtime.wHour, systemtime.wMinute, systemtime.wSecond, systemtime.wMilliseconds);
+  wcscpy_s(fname, sizeof(wchar_t) * MAX_PATH, save_path);
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L"/");
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, folder);
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L"/");
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, timestring);
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L".jpeg");
+}
+
+static void finish_folder(wchar_t *folder, wchar_t *save_path)
+{
+  wchar_t fname[MAX_PATH];
+
+  if (folder) {
+    wcscpy_s(fname, sizeof(fname), save_path);
+    wcscat_s(fname, sizeof(fname), L"/");
+    wcscat_s(fname, sizeof(fname), folder);
+    wcscat_s(fname, sizeof(fname), L"/done");
+
+    FILE *f = _wfopen(fname, L"wb");
+    fclose(f);
+  }
+}
+
+static void save_frame(uint8_t *raw_frame, unsigned width, unsigned height, int quality, wchar_t *fname)
+{
+  FILE *f = _wfopen(fname, L"wb");
+
+  struct jpeg_compress_struct cinfo;
+  struct jpeg_error_mgr jerr;
+  cinfo.err = jpeg_std_error(&jerr);
+  jpeg_create_compress(&cinfo);
+  jpeg_stdio_dest(&cinfo, f);
+
+  cinfo.image_width = width;
+  cinfo.image_height = height;
+  cinfo.input_components = 3;
+  cinfo.in_color_space = JCS_RGB;
+
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, quality, true);
+  jpeg_start_compress(&cinfo, true);
+
+  JSAMPROW row_ptr[1];
+  uint8_t *row_buf = bzalloc(sizeof(uint8_t) * cinfo.image_width * 3);
+  row_ptr[0] = &row_buf[0];
+
+  while (cinfo.next_scanline < cinfo.image_height) {
+    unsigned offset = cinfo.next_scanline * cinfo.image_width * 4;
+    for (unsigned i = 0; i < cinfo.image_width; i++) {
+      row_buf[i * 3] = raw_frame[offset + (i * 4)];
+      row_buf[(i * 3) + 1] = raw_frame[offset + (i * 4) + 1];
+      row_buf[(i * 3) + 2] = raw_frame[offset + (i * 4) + 2];
+    }
+    jpeg_write_scanlines(&cinfo, row_ptr, 1);
+  }
+
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  bfree(row_buf);
+  fclose(f);
+}
+
+static void process_raw_frame(void *data, uint8_t *raw_frame)
+{
+  struct frame_capture_filter_data *filter = data;
+
+  SYSTEMTIME systemtime;
+  wchar_t fname[MAX_PATH];
+  GetSystemTime(&systemtime);
+
+  if (filter->current_folder == NULL || filter->frame_count == 60) {
+    finish_folder(filter->current_folder, filter->save_path);
+    wchar_t *folder = bzalloc(sizeof(wchar_t) * 18);
+    generate_folder(systemtime, folder, filter->save_path);
+    bfree(filter->current_folder);
+    filter->current_folder = folder;
+    filter->frame_count = 0;
+  }
+  generate_filename(systemtime, fname, filter->current_folder, filter->save_path);
+  save_frame(raw_frame, filter->width, filter->height, 90, fname);
+  filter->frame_count = filter->frame_count + 1;
+}
+
+static void *write_thread(void *data)
+{
+  struct frame_capture_filter_data *filter = data;
+
+  while (os_sem_wait(filter->write_sem) == 0) {
+    if (os_event_try(filter->stop_event) == 0)
+      break;
+    pthread_mutex_lock(&filter->write_mutex);
+    process_raw_frame(filter, filter->frame_data);
+    pthread_mutex_unlock(&filter->write_mutex);
+  }
+  return NULL;
+}
+
+void frame_capture_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
+{
+  UNUSED_PARAMETER(cx);
+  UNUSED_PARAMETER(cy);
+  struct frame_capture_filter_data *filter = data;
+
+  DWORD currtime = GetTickCount();
+  if (currtime - filter->last_frame_at < 2000) {
+    return;
+  }
+  filter->last_frame_at = currtime;
+
+  obs_source_t *parent = obs_filter_get_parent(filter->source);
+  if (!parent) {
+      return;
+  }
+
+  uint32_t base_width = obs_source_get_base_width(parent);
+  uint32_t base_height = obs_source_get_base_height(parent);
+  uint32_t width = 0;
+  uint32_t height = 0;
+
+  if (base_width != 0 && base_height != 0) {
+    if ((float)base_width / (float)base_height > 2.38) { // 43:18
+      width = 2580;
+      height = 1080;
+    }
+    else if ((float)base_width / (float)base_height > 2.1) { // 64:27
+      width = 2560;
+      height = 1080;
+    }
+    else if ((float)base_width / (float)base_height > 1.7) { // 16:9
+      width = 1920;
+      height = 1080;
+    }
+    else if ((float)base_width / (float)base_height > 1.5) {  // 16:10
+      width = 1920;
+      height = 1200;
+    }
+    else if ((float)base_width / (float)base_height > 1.2) { // 4:3
+      width = 1920;
+      height = 1440;
+    }
+  }
+
+  gs_texrender_reset(filter->texrender);
+
+  if (gs_texrender_begin(filter->texrender, width, height)) {
+    struct vec4 background;
+    vec4_zero(&background);
+
+    gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
+    gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
+
+    gs_blend_state_push();
+    gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+    gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_BICUBIC);
+    gs_eparam_t *dimension_param = gs_effect_get_param_by_name(effect, "base_dimension_i");
+    struct vec2 dimension_i;
+    vec2_set(&dimension_i, 1.0f / (float)width, 1.0f / (float)height);
+    gs_eparam_t *undistort_factor_param = gs_effect_get_param_by_name(effect, "undistort_factor");
+    float undistort_factor = 1.0f;
+    if (!obs_source_process_filter_begin(filter->source, GS_RGBA, OBS_NO_DIRECT_RENDERING)) {
+      gs_texrender_end(filter->texrender);
+      return;
+    }
+    gs_effect_set_vec2(dimension_param, &dimension_i);
+    gs_effect_set_float(undistort_factor_param, undistort_factor);
+    obs_source_process_filter_tech_end(filter->source, effect, width, height, "Draw");
+
+    gs_blend_state_pop();
+    gs_texrender_end(filter->texrender);
+
+    if (filter->width != width || filter->height != height) {
+      gs_stagesurface_destroy(filter->stagesurface);
+      filter->stagesurface = gs_stagesurface_create(width, height, GS_RGBA);
+      filter->width = width;
+      filter->height = height;
+    }
+
+    pthread_mutex_lock(&filter->write_mutex);
+    if (filter->frame_data) {
+      gs_stagesurface_unmap(filter->stagesurface);
+      filter->frame_data = NULL;
+    }
+    gs_stage_texture(filter->stagesurface, gs_texrender_get_texture(filter->texrender));
+    gs_stagesurface_map(filter->stagesurface, &filter->frame_data, &filter->frame_linesize);
+    pthread_mutex_unlock(&filter->write_mutex);
+    os_sem_post(filter->write_sem);
+  }
+}
+
+static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *source)
+{
+  struct frame_capture_filter_data *filter = bzalloc(sizeof(*filter));
+  wchar_t *appDataPath = bzalloc(sizeof(wchar_t) * MAX_PATH);
+  wchar_t *foundPath = 0;
+  HRESULT hr = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, NULL, &foundPath);
+  if (hr != S_OK) {
+    return NULL;
+  }
+  wcscpy_s(appDataPath, sizeof(wchar_t) * MAX_PATH, foundPath);
+  wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/Pursuit");
+  _wmkdir(appDataPath);
+  wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/Captures");
+  _wmkdir(appDataPath);
+  CoTaskMemFree(foundPath);
+
+  pthread_mutex_init_value(&filter->write_mutex);
+  if (pthread_mutex_init(&filter->write_mutex, NULL) != 0) {
+    pthread_mutex_destroy(&filter->write_mutex);
+    bfree(filter);
+    return NULL;
+  }
+
+  if (os_event_init(&filter->stop_event, OS_EVENT_TYPE_AUTO) != 0) {
+    pthread_mutex_destroy(&filter->write_mutex);
+    bfree(filter);
+    return NULL;
+  }
+
+  if (os_sem_init(&filter->write_sem, 0) != 0) {
+    pthread_mutex_destroy(&filter->write_mutex);
+    os_event_destroy(filter->stop_event);
+    bfree(filter);
+    return NULL;
+  }
+
+  if (pthread_create(&filter->write_thread, NULL, write_thread, filter) != 0) {
+    pthread_mutex_destroy(&filter->write_mutex);
+    os_event_destroy(filter->stop_event);
+    os_sem_destroy(filter->write_sem);
+    bfree(filter);
+    return NULL;
+  }
+
+  filter->source = source;
+  filter->texrender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+  filter->frame_data = NULL;
+  filter->save_path = appDataPath;
+  filter->frame_count = 0;
+  DWORD currtime = GetTickCount();
+  filter->last_frame_at = currtime;
+  filter->current_folder = NULL;
+
+  frame_capture_filter_update(filter, settings);
+  obs_add_main_render_callback(frame_capture_filter_offscreen_render, filter);
+  return filter;
+}
+
+static void frame_capture_filter_destroy(void *data)
+{
+  struct frame_capture_filter_data *filter = data;
+
+  if (filter) {
+    obs_remove_main_render_callback(frame_capture_filter_offscreen_render, filter);
+
+    os_event_signal(filter->stop_event);
+    os_sem_post(filter->write_sem);
+    pthread_join(filter->write_thread, NULL);
+
+    pthread_mutex_lock(&filter->write_mutex);
+    gs_stagesurface_unmap(filter->stagesurface);
+    gs_stagesurface_destroy(filter->stagesurface);
+    gs_texrender_destroy(filter->texrender);
+    pthread_mutex_unlock(&filter->write_mutex);
+
+    pthread_mutex_destroy(&filter->write_mutex);
+    os_event_destroy(filter->stop_event);
+    os_sem_destroy(filter->write_sem);
+    finish_folder(filter->current_folder, filter->save_path);
+    bfree(filter->current_folder);
+    bfree(filter->save_path);
+    bfree(filter);
+  }
+}
+
+static void frame_capture_filter_tick(void* data, float seconds)
+{
+    UNUSED_PARAMETER(seconds);
+    UNUSED_PARAMETER(data);
+}
+
+static void frame_capture_filter_video_render(void* data, gs_effect_t* effect)
+{
+    UNUSED_PARAMETER(effect);
+    struct frame_capture_filter_data *filter = data;
+    obs_source_skip_video_filter(filter->source);
+}
+
+extern struct obs_source_info frame_capture_filter = {
+  .id = "pursuit_frame_capture_filter",
+  .type = OBS_SOURCE_TYPE_FILTER,
+  .output_flags = OBS_SOURCE_VIDEO,
+  .get_name = frame_capture_filter_name,
+  .get_properties = frame_capture_filter_properties,
+  .get_defaults = frame_capture_filter_defaults,
+  .create = frame_capture_filter_create,
+  .destroy = frame_capture_filter_destroy,
+  .update = frame_capture_filter_update,
+  .video_tick = frame_capture_filter_tick,
+  .video_render = frame_capture_filter_video_render,
+};
+
+bool obs_module_load(void)
+{
+  obs_register_source(&frame_capture_filter);
+  return true;
+}

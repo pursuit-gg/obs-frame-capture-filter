@@ -1,0 +1,9 @@
+/build
+.vs/*
+
+/libjpeg/jconfig.h
+/libjpeg/.vs/*
+/libjpeg/x64/*
+*.vcxproj
+*.vcxproj.filters
+*.sln
