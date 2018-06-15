@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <shlobj.h>
 #include <inttypes.h>
@@ -198,25 +199,12 @@ void frame_capture_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
   uint32_t height = 0;
 
   if (base_width != 0 && base_height != 0) {
-    if ((float)base_width / (float)base_height > 2.38) { // 43:18
-      width = 2580;
-      height = 1080;
-    }
-    else if ((float)base_width / (float)base_height > 2.1) { // 64:27
-      width = 2560;
-      height = 1080;
-    }
-    else if ((float)base_width / (float)base_height > 1.7) { // 16:9
+    if ((float)base_width / (float)base_height < 16.0f / 9.0f) {
       width = 1920;
+      height = (int)roundf((float)base_height * (1920.0f / (float)base_width));
+    } else {
       height = 1080;
-    }
-    else if ((float)base_width / (float)base_height > 1.5) {  // 16:10
-      width = 1920;
-      height = 1200;
-    }
-    else if ((float)base_width / (float)base_height > 1.2) { // 4:3
-      width = 1920;
-      height = 1440;
+      width = (int)roundf((float)base_width * (1080.0f / (float)base_height));
     }
   }
 
