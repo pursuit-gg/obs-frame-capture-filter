@@ -149,7 +149,7 @@ static void process_raw_frame(void *data)
   wchar_t fname[MAX_PATH];
   GetSystemTime(&systemtime);
 
-  if (filter->current_folder == NULL || filter->frame_count == 60) {
+  if (filter->current_folder == NULL || filter->frame_count >= 15) {
     finish_folder(filter->current_folder, filter->save_path);
     wchar_t *folder = bzalloc(sizeof(wchar_t) * 18);
     generate_folder(systemtime, folder, filter->save_path);
