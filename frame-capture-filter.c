@@ -9,6 +9,28 @@
 #include <obs-module.h>
 #include <libjpeg/jpeglib.h>
 
+#define OVERWATCH_QUALITY                         90
+#define OVERWATCH_DESIRED_WIDTH                   1920
+#define OVERWATCH_DESIRED_HEIGHT                  1080
+#define OVERWATCH_FRAMES_PER_FOLDER               15
+#define OVERWATCH_MILLISECONDS_BETWEEN_FRAMES     2000
+
+#define FORTNITE_QUALITY                          70
+#define FORTNITE_DESIRED_WIDTH                    1280
+#define FORTNITE_DESIRED_HEIGHT                   720
+#define FORTNITE_FRAMES_PER_FOLDER                20
+#define FORTNITE_MILLISECONDS_BETWEEN_FRAMES      1000
+
+#define SETTING_GAME                              "game"
+#define SETTING_OVERWATCH                         "overwatch"
+#define SETTING_FORTNITE                          "fortnite"
+
+#define TEXT_GAME                                 "Game"
+#define TEXT_OVERWATCH                            "Overwatch"
+#define TEXT_FORTNITE                             "Fortnite"
+#define LONG_TEXT_OVERWATCH                       L"Overwatch"
+#define LONG_TEXT_FORTNITE                        L"Fortnite"
+
 OBS_DECLARE_MODULE()
 
 struct frame_capture_filter_data {
@@ -16,7 +38,7 @@ struct frame_capture_filter_data {
 
   wchar_t *save_path;
   wchar_t *current_folder;
-  int frame_count;
+  uint32_t frame_count;
   DWORD last_frame_at;
   uint32_t width;
   uint32_t height;
@@ -29,6 +51,14 @@ struct frame_capture_filter_data {
   pthread_t write_thread;
   os_sem_t *write_sem;
   os_event_t *stop_event;
+
+  wchar_t *previous_game;
+  wchar_t *game;
+  uint32_t quality;
+  uint32_t desired_width;
+  uint32_t desired_height;
+  uint32_t frames_per_folder;
+  uint32_t milliseconds_between_frames;
 };
 
 static const char *frame_capture_filter_name(void *data)
@@ -39,8 +69,26 @@ static const char *frame_capture_filter_name(void *data)
 
 static void frame_capture_filter_update(void *data, obs_data_t *settings)
 {
-  UNUSED_PARAMETER(data);
-  UNUSED_PARAMETER(settings);
+  struct frame_capture_filter_data *filter = data;
+  const char *game = obs_data_get_string(settings, SETTING_GAME);
+
+  pthread_mutex_lock(&filter->write_mutex);
+  if (strcmp(game, SETTING_OVERWATCH) == 0) {
+    filter->game = LONG_TEXT_OVERWATCH;
+    filter->quality = OVERWATCH_QUALITY;
+    filter->desired_width = OVERWATCH_DESIRED_WIDTH;
+    filter->desired_height = OVERWATCH_DESIRED_HEIGHT;
+    filter->frames_per_folder = OVERWATCH_FRAMES_PER_FOLDER;
+    filter->milliseconds_between_frames = OVERWATCH_MILLISECONDS_BETWEEN_FRAMES;
+  } else if (strcmp(game, SETTING_FORTNITE) == 0) {
+    filter->game = LONG_TEXT_FORTNITE;
+    filter->quality = FORTNITE_QUALITY;
+    filter->desired_width = FORTNITE_DESIRED_WIDTH;
+    filter->desired_height = FORTNITE_DESIRED_HEIGHT;
+    filter->frames_per_folder = FORTNITE_FRAMES_PER_FOLDER;
+    filter->milliseconds_between_frames = FORTNITE_MILLISECONDS_BETWEEN_FRAMES;
+  }
+  pthread_mutex_unlock(&filter->write_mutex);
 }
 
 static bool open_pursuit(obs_properties_t *pps, obs_property_t *prop, void *data)
@@ -51,35 +99,42 @@ static bool open_pursuit(obs_properties_t *pps, obs_property_t *prop, void *data
 
 static obs_properties_t *frame_capture_filter_properties(void *data)
 {
-  struct frame_capture_filter_data *filter = data;
+  UNUSED_PARAMETER(data);
+
   obs_properties_t *props = obs_properties_create();
 
+  obs_property_t *games = obs_properties_add_list(props, SETTING_GAME, TEXT_GAME, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+  obs_property_list_add_string(games, TEXT_OVERWATCH, SETTING_OVERWATCH);
+  obs_property_list_add_string(games, TEXT_FORTNITE, SETTING_FORTNITE);
   obs_properties_add_button(props, "pursuit_website", "Pursuit.gg Plugin Instructions", open_pursuit);
   return props;
 }
 
-void frame_capture_filter_defaults(obs_data_t* defaults) {
-  UNUSED_PARAMETER(defaults);
+void frame_capture_filter_defaults(obs_data_t* settings) {
+  obs_data_set_default_string(settings, SETTING_GAME, SETTING_OVERWATCH);
 }
 
-static void generate_folder(SYSTEMTIME systemtime, wchar_t *folder, wchar_t *save_path)
+static void generate_folder(SYSTEMTIME systemtime, wchar_t *folder, wchar_t *game, wchar_t *save_path)
 {
   wchar_t dirname[MAX_PATH];
 
   swprintf_s(folder, sizeof(wchar_t) * 18, L"%04d%02d%02d%02d%02d%02d%03d", systemtime.wYear, systemtime.wMonth, systemtime.wDay, systemtime.wHour, systemtime.wMinute, systemtime.wSecond, systemtime.wMilliseconds);
   wcscpy_s(dirname, sizeof(dirname), save_path);
   wcscat_s(dirname, sizeof(dirname), L"/");
+  wcscat_s(dirname, sizeof(dirname), game);
+  wcscat_s(dirname, sizeof(dirname), L"/");
   wcscat_s(dirname, sizeof(dirname), folder);
-
   _wmkdir(dirname);
 }
 
-static void generate_filename(SYSTEMTIME systemtime, wchar_t *fname, wchar_t *folder, wchar_t *save_path)
+static void generate_filename(SYSTEMTIME systemtime, wchar_t *fname, wchar_t *folder, wchar_t *game, wchar_t *save_path)
 {
   wchar_t timestring[18];
 
   swprintf_s(timestring, sizeof(timestring), L"%04d%02d%02d%02d%02d%02d%03d", systemtime.wYear, systemtime.wMonth, systemtime.wDay, systemtime.wHour, systemtime.wMinute, systemtime.wSecond, systemtime.wMilliseconds);
   wcscpy_s(fname, sizeof(wchar_t) * MAX_PATH, save_path);
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L"/");
+  wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, game);
   wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L"/");
   wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, folder);
   wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L"/");
@@ -87,12 +142,14 @@ static void generate_filename(SYSTEMTIME systemtime, wchar_t *fname, wchar_t *fo
   wcscat_s(fname, sizeof(wchar_t) * MAX_PATH, L".jpeg");
 }
 
-static void finish_folder(wchar_t *folder, wchar_t *save_path)
+static void finish_folder(wchar_t *folder, wchar_t *game, wchar_t *save_path)
 {
   wchar_t fname[MAX_PATH];
 
   if (folder) {
     wcscpy_s(fname, sizeof(fname), save_path);
+    wcscat_s(fname, sizeof(fname), L"/");
+    wcscat_s(fname, sizeof(fname), game);
     wcscat_s(fname, sizeof(fname), L"/");
     wcscat_s(fname, sizeof(fname), folder);
     wcscat_s(fname, sizeof(fname), L"/done");
@@ -102,7 +159,7 @@ static void finish_folder(wchar_t *folder, wchar_t *save_path)
   }
 }
 
-static void save_frame(uint8_t *raw_frame, uint32_t linesize, uint32_t width, uint32_t height, wchar_t *fname)
+static void save_frame(uint8_t *raw_frame, uint32_t linesize, uint32_t width, uint32_t height, int quality, wchar_t *fname)
 {
   FILE *f = _wfopen(fname, L"wb");
 
@@ -118,7 +175,7 @@ static void save_frame(uint8_t *raw_frame, uint32_t linesize, uint32_t width, ui
   cinfo.in_color_space = JCS_RGB;
 
   jpeg_set_defaults(&cinfo);
-  jpeg_set_quality(&cinfo, 90, true);
+  jpeg_set_quality(&cinfo, quality, true);
   jpeg_start_compress(&cinfo, true);
 
   JSAMPROW row_ptr[1];
@@ -149,16 +206,17 @@ static void process_raw_frame(void *data)
   wchar_t fname[MAX_PATH];
   GetSystemTime(&systemtime);
 
-  if (filter->current_folder == NULL || filter->frame_count >= 15) {
-    finish_folder(filter->current_folder, filter->save_path);
+  if (filter->current_folder == NULL || filter->frame_count >= filter->frames_per_folder || wcscmp(filter->previous_game, filter->game) != 0) {
+    finish_folder(filter->current_folder, filter->previous_game, filter->save_path);
     wchar_t *folder = bzalloc(sizeof(wchar_t) * 18);
-    generate_folder(systemtime, folder, filter->save_path);
+    generate_folder(systemtime, folder, filter->game, filter->save_path);
     bfree(filter->current_folder);
     filter->current_folder = folder;
     filter->frame_count = 0;
+    filter->previous_game = filter->game;
   }
-  generate_filename(systemtime, fname, filter->current_folder, filter->save_path);
-  save_frame(filter->frame_data, filter->frame_linesize, filter->width, filter->height, fname);
+  generate_filename(systemtime, fname, filter->current_folder, filter->game, filter->save_path);
+  save_frame(filter->frame_data, filter->frame_linesize, filter->width, filter->height, filter->quality, fname);
   filter->frame_count = filter->frame_count + 1;
 }
 
@@ -183,7 +241,7 @@ void frame_capture_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
   struct frame_capture_filter_data *filter = data;
 
   DWORD currtime = GetTickCount();
-  if (currtime - filter->last_frame_at < 2000) {
+  if (currtime - filter->last_frame_at < filter->milliseconds_between_frames) {
     return;
   }
   filter->last_frame_at = currtime;
@@ -199,12 +257,12 @@ void frame_capture_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
   uint32_t height = 0;
 
   if (base_width != 0 && base_height != 0) {
-    if ((float)base_width / (float)base_height < 16.0f / 9.0f) {
-      width = 1920;
-      height = (int)roundf((float)base_height * (1920.0f / (float)base_width));
+    if ((float)base_width / (float)base_height < (float)filter->desired_width / (float)filter->desired_height) {
+      width = filter->desired_width;
+      height = (int)roundf((float)base_height * ((float)filter->desired_width / (float)base_width));
     } else {
-      height = 1080;
-      width = (int)roundf((float)base_width * (1080.0f / (float)base_height));
+      height = filter->desired_height;
+      width = (int)roundf((float)base_width * ((float)filter->desired_height / (float)base_height));
     }
   }
 
@@ -260,6 +318,7 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
 {
   struct frame_capture_filter_data *filter = bzalloc(sizeof(*filter));
   wchar_t *appDataPath = bzalloc(sizeof(wchar_t) * MAX_PATH);
+  wchar_t *gamePath = bzalloc(sizeof(wchar_t) * MAX_PATH);
   wchar_t *foundPath = 0;
   HRESULT hr = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, NULL, &foundPath);
   if (hr != S_OK) {
@@ -270,6 +329,15 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
   _wmkdir(appDataPath);
   wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/Captures");
   _wmkdir(appDataPath);
+  wcscpy_s(gamePath, sizeof(wchar_t) * MAX_PATH, appDataPath);
+  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, L"/");
+  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, LONG_TEXT_OVERWATCH);
+  _wmkdir(gamePath);
+  wcscpy_s(gamePath, sizeof(wchar_t) * MAX_PATH, appDataPath);
+  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, L"/");
+  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, LONG_TEXT_FORTNITE);
+  _wmkdir(gamePath);
+  bfree(gamePath);
   CoTaskMemFree(foundPath);
 
   pthread_mutex_init_value(&filter->write_mutex);
@@ -309,6 +377,14 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
   filter->last_frame_at = currtime;
   filter->current_folder = NULL;
 
+  filter->previous_game = LONG_TEXT_OVERWATCH;
+  filter->game = LONG_TEXT_OVERWATCH;
+  filter->quality = OVERWATCH_QUALITY;
+  filter->desired_width = OVERWATCH_DESIRED_WIDTH;
+  filter->desired_height = OVERWATCH_DESIRED_HEIGHT;
+  filter->frames_per_folder = OVERWATCH_FRAMES_PER_FOLDER;
+  filter->milliseconds_between_frames = OVERWATCH_MILLISECONDS_BETWEEN_FRAMES;
+
   frame_capture_filter_update(filter, settings);
   obs_add_main_render_callback(frame_capture_filter_offscreen_render, filter);
   return filter;
@@ -334,7 +410,7 @@ static void frame_capture_filter_destroy(void *data)
     pthread_mutex_destroy(&filter->write_mutex);
     os_event_destroy(filter->stop_event);
     os_sem_destroy(filter->write_sem);
-    finish_folder(filter->current_folder, filter->save_path);
+    finish_folder(filter->current_folder, filter->previous_game, filter->save_path);
     bfree(filter->current_folder);
     bfree(filter->save_path);
     bfree(filter);
