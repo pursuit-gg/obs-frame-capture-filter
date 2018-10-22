@@ -64,7 +64,7 @@ struct frame_capture_filter_data {
 static const char *frame_capture_filter_name(void *data)
 {
   UNUSED_PARAMETER(data);
-  return "Pursuit Frame Capture";
+  return "Pursuit Fortnite Frame Capture";
 }
 
 static void frame_capture_filter_update(void *data, obs_data_t *settings)
@@ -102,16 +102,12 @@ static obs_properties_t *frame_capture_filter_properties(void *data)
   UNUSED_PARAMETER(data);
 
   obs_properties_t *props = obs_properties_create();
-
-  obs_property_t *games = obs_properties_add_list(props, SETTING_GAME, TEXT_GAME, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-  obs_property_list_add_string(games, TEXT_OVERWATCH, SETTING_OVERWATCH);
-  obs_property_list_add_string(games, TEXT_FORTNITE, SETTING_FORTNITE);
   obs_properties_add_button(props, "pursuit_website", "Pursuit.gg Plugin Instructions", open_pursuit);
   return props;
 }
 
 void frame_capture_filter_defaults(obs_data_t* settings) {
-  obs_data_set_default_string(settings, SETTING_GAME, SETTING_OVERWATCH);
+  UNUSED_PARAMETER(settings);
 }
 
 static void generate_folder(SYSTEMTIME systemtime, wchar_t *folder, wchar_t *game, wchar_t *save_path)
@@ -331,10 +327,6 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
   _wmkdir(appDataPath);
   wcscpy_s(gamePath, sizeof(wchar_t) * MAX_PATH, appDataPath);
   wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, L"/");
-  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, LONG_TEXT_OVERWATCH);
-  _wmkdir(gamePath);
-  wcscpy_s(gamePath, sizeof(wchar_t) * MAX_PATH, appDataPath);
-  wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, L"/");
   wcscat_s(gamePath, sizeof(wchar_t) * MAX_PATH, LONG_TEXT_FORTNITE);
   _wmkdir(gamePath);
   bfree(gamePath);
@@ -377,13 +369,13 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
   filter->last_frame_at = currtime;
   filter->current_folder = NULL;
 
-  filter->previous_game = LONG_TEXT_OVERWATCH;
-  filter->game = LONG_TEXT_OVERWATCH;
-  filter->quality = OVERWATCH_QUALITY;
-  filter->desired_width = OVERWATCH_DESIRED_WIDTH;
-  filter->desired_height = OVERWATCH_DESIRED_HEIGHT;
-  filter->frames_per_folder = OVERWATCH_FRAMES_PER_FOLDER;
-  filter->milliseconds_between_frames = OVERWATCH_MILLISECONDS_BETWEEN_FRAMES;
+  filter->previous_game = LONG_TEXT_FORTNITE;
+  filter->game = LONG_TEXT_FORTNITE;
+  filter->quality = FORTNITE_QUALITY;
+  filter->desired_width = FORTNITE_DESIRED_WIDTH;
+  filter->desired_height = FORTNITE_DESIRED_HEIGHT;
+  filter->frames_per_folder = FORTNITE_FRAMES_PER_FOLDER;
+  filter->milliseconds_between_frames = FORTNITE_MILLISECONDS_BETWEEN_FRAMES;
 
   frame_capture_filter_update(filter, settings);
   obs_add_main_render_callback(frame_capture_filter_offscreen_render, filter);
