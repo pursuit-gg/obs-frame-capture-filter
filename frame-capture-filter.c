@@ -93,7 +93,7 @@ static void frame_capture_filter_update(void *data, obs_data_t *settings)
 
 static bool open_pursuit(obs_properties_t *pps, obs_property_t *prop, void *data)
 {
-  ShellExecute(NULL, "open", "https://pursuit.gg/obs", NULL, NULL, SW_SHOWNORMAL);
+  ShellExecute(NULL, "open", "https://alpha.pursuit.gg/obs", NULL, NULL, SW_SHOWNORMAL);
   return true;
 }
 
@@ -321,7 +321,7 @@ static void *frame_capture_filter_create(obs_data_t *settings, obs_source_t *sou
     return NULL;
   }
   wcscpy_s(appDataPath, sizeof(wchar_t) * MAX_PATH, foundPath);
-  wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/Pursuit");
+  wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/PursuitGG");
   _wmkdir(appDataPath);
   wcscat_s(appDataPath, sizeof(wchar_t) * MAX_PATH, L"/Captures");
   _wmkdir(appDataPath);
